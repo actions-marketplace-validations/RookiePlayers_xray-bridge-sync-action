@@ -1,6 +1,7 @@
 import * as core from '@actions/core';
 import * as fs from 'fs';
 import { TagMap } from './tagExtractor';
+import { XrayCredentialsInput } from './types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,7 @@ export interface SyncPayload {
   commitSha?: string;
   branch?: string;
   runUrl?: string;
+  credentials?: XrayCredentialsInput;
 }
 
 // ─── Main sync function ───────────────────────────────────────────────────────
@@ -46,7 +48,8 @@ export async function syncResults(
   tagMap: TagMap,
   commitShaOverride?: string,   // NEW — used by Bitbucket entry point
   branchOverride?: string,       // NEW
-  runUrlOverride?: string        // NEW
+  runUrlOverride?: string,       // NEW
+  credentials?: XrayCredentialsInput  // NEW — explicit CI credentials, appended last to keep the Bitbucket entry point's positional call unaffected
 ): Promise<SyncResult> {
   const payload: SyncPayload = {
     config,
@@ -55,10 +58,12 @@ export async function syncResults(
     commitSha: commitShaOverride ?? process.env.GITHUB_SHA,
     branch:    branchOverride    ?? process.env.GITHUB_REF_NAME,
     runUrl:    runUrlOverride    ?? buildRunUrl(),
+    credentials,
   };
 
   core.info(`Syncing to Xray: project=${config.project_key}, version=${config.fix_version}, reporter=${config.reporter}`);
   core.info(`Tag map: ${Object.keys(tagMap).length} tagged file(s)`);
+  core.info(`Credentials: ${credentials ? 'forwarding xray_client_id/jira_* from action inputs' : 'none supplied — service will use its own env credentials'}`);
 
   const payloadPath = './xray-payload.json';
   fs.writeFileSync(payloadPath, JSON.stringify(payload));
@@ -70,7 +75,25 @@ export async function syncResults(
     body: fs.readFileSync(payloadPath),
   });
 
-  const body = await response.json() as any;
+  // Read as text first — a non-JSON response (wrong URL, auth wall, proxy error
+  // page, or the service crashing on this payload with no catch-all error
+  // handler) must not surface as a bare "Unexpected token '<'" JSON parse
+  // error with no indication of what actually came back.
+  const rawBody = await response.text();
+  const contentType = response.headers.get('content-type') ?? 'unknown';
+
+  let body: any;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    throw new Error(
+      `Xray sync failed (${response.status} ${response.statusText}): service returned ` +
+      `non-JSON response (content-type: ${contentType}). This usually means ` +
+      `xray_service_url is wrong, the request hit an auth wall, or the service ` +
+      `threw an unhandled error processing this payload — check xray_service_url ` +
+      `and the service's own logs. First 500 chars of body:\n${rawBody.slice(0, 500)}`
+    );
+  }
 
   if (!response.ok) {
     throw new Error(

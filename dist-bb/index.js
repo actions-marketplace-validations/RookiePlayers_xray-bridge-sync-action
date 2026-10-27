@@ -32663,7 +32663,8 @@ const fs = __importStar(__nccwpck_require__(9896));
  */
 async function syncResults(xrayServiceUrl, config, rawResults, tagMap, commitShaOverride, // NEW — used by Bitbucket entry point
 branchOverride, // NEW
-runUrlOverride // NEW
+runUrlOverride, // NEW
+credentials // NEW — explicit CI credentials, appended last to keep the Bitbucket entry point's positional call unaffected
 ) {
     const payload = {
         config,
@@ -32672,9 +32673,11 @@ runUrlOverride // NEW
         commitSha: commitShaOverride ?? process.env.GITHUB_SHA,
         branch: branchOverride ?? process.env.GITHUB_REF_NAME,
         runUrl: runUrlOverride ?? buildRunUrl(),
+        credentials,
     };
     core.info(`Syncing to Xray: project=${config.project_key}, version=${config.fix_version}, reporter=${config.reporter}`);
     core.info(`Tag map: ${Object.keys(tagMap).length} tagged file(s)`);
+    core.info(`Credentials: ${credentials ? 'forwarding xray_client_id/jira_* from action inputs' : 'none supplied — service will use its own env credentials'}`);
     const payloadPath = './xray-payload.json';
     fs.writeFileSync(payloadPath, JSON.stringify(payload));
     core.info(`Payload size: ${fs.statSync(payloadPath).size} bytes`);
@@ -32683,7 +32686,23 @@ runUrlOverride // NEW
         headers: { 'Content-Type': 'application/json' },
         body: fs.readFileSync(payloadPath),
     });
-    const body = await response.json();
+    // Read as text first — a non-JSON response (wrong URL, auth wall, proxy error
+    // page, or the service crashing on this payload with no catch-all error
+    // handler) must not surface as a bare "Unexpected token '<'" JSON parse
+    // error with no indication of what actually came back.
+    const rawBody = await response.text();
+    const contentType = response.headers.get('content-type') ?? 'unknown';
+    let body;
+    try {
+        body = JSON.parse(rawBody);
+    }
+    catch {
+        throw new Error(`Xray sync failed (${response.status} ${response.statusText}): service returned ` +
+            `non-JSON response (content-type: ${contentType}). This usually means ` +
+            `xray_service_url is wrong, the request hit an auth wall, or the service ` +
+            `threw an unhandled error processing this payload — check xray_service_url ` +
+            `and the service's own logs. First 500 chars of body:\n${rawBody.slice(0, 500)}`);
+    }
     if (!response.ok) {
         throw new Error(`Xray sync failed (${response.status}): ${JSON.stringify(body)}`);
     }
